@@ -1,93 +1,54 @@
-<p align="center">
-  <img width="300px" src="https://upload.wikimedia.org/wikipedia/commons/8/8f/Tor_project_logo_hq.png">
-</p>
+# Tor SOCKS Proxy
 
-# Tor-socks-proxy
-
-![license](https://img.shields.io/badge/license-GPLv3.0-brightgreen.svg?style=flat)
-[![Build Status](https://app.travis-ci.com/PeterDaveHello/tor-socks-proxy.svg?branch=master)](https://app.travis-ci.com/PeterDaveHello/tor-socks-proxy)
-[![Docker Hub pulls](https://img.shields.io/docker/pulls/peterdavehello/tor-socks-proxy.svg)](https://hub.docker.com/r/peterdavehello/tor-socks-proxy/)
-
-[![Docker Hub badge](http://dockeri.co/image/peterdavehello/tor-socks-proxy)](https://hub.docker.com/r/peterdavehello/tor-socks-proxy/)
-
-The super easy way to set up a [Tor](https://www.torproject.org) [SOCKS5](https://en.wikipedia.org/wiki/SOCKS#SOCKS5) [proxy server](https://en.wikipedia.org/wiki/Proxy_server) inside a [Docker](https://en.wikipedia.org/wiki/Docker_(software)) [container](https://en.wikipedia.org/wiki/Container_(virtualization)), without Tor relay/exit node function enabled.
-
-## Docker image Repository
-
-We push the built image to Docker Hub and GitHub Container Registry:
-
-- GitHub Container Registry:
-  - `ghcr.io/peterdavehello/tor-socks-proxy`
-  - <https://github.com/PeterDaveHello/tor-socks-proxy/pkgs/container/tor-socks-proxy>
-- Docker Hub:
-  - `peterdavehello/tor-socks-proxy`
-  - <https://hub.docker.com/r/peterdavehello/tor-socks-proxy/>
-
-Use the prefix `ghcr.io/` if you prefer to use GitHub Container Registry.
+A small Docker image for a Tor SOCKS5 and DNS proxy. Fork of [PeterDaveHello/tor-socks-proxy](https://github.com/PeterDaveHello/tor-socks-proxy).
 
 ## Usage
 
-### First-Time Setup
-
 ```sh
-docker run -d --restart=always --name tor-socks-proxy -p 127.0.0.1:9150:9150/tcp peterdavehello/tor-socks-proxy:latest
+docker run -d \
+  --name torproxy \
+  --restart unless-stopped \
+  -p 127.0.0.1:9050:9150 \
+  -v torproxy-data:/var/lib/tor \
+  ghcr.io/elehiggle/tor-socks-proxy:latest
 ```
 
-- `--restart=always`: This ensures the container automatically restarts whenever the system reboots.
-- `-p 127.0.0.1:9150:9150/tcp`: This binds the container to localhost, and you should not change this IP unless you want to expose the proxy to a local network or the Internet.
-  - You can change the first `9150` to any available port. Please note that ports `9050`/`9150` may be occupied if you are running another Tor client like TorBrowser.
+This starts the proxy directly; no provenance tooling or GitHub login is required. For LAN access, replace `127.0.0.1` with your server's LAN IP.
 
-### Start or stop an existing Instance manually
+### Check the proxy
 
 ```sh
-docker start tor-socks-proxy
+curl --socks5-hostname 127.0.0.1:9050 https://check.torproject.org/api/ip
+docker logs torproxy
 ```
+
+### Start or stop
 
 ```sh
-docker stop tor-socks-proxy
+docker stop torproxy
+docker start torproxy
 ```
 
-### Checking the Proxy Status and logs
+### DNS over Tor
+
+Add `-p 127.0.0.1:8853:8853/udp` to the run command to publish DNS. The SOCKS listener inside the container remains on port `9150`.
+
+### Custom configuration
+
+Mount your configuration with `-v /path/to/torrc:/etc/tor/torrc:ro`. Tor runs as UID/GID `10001:10001`; the data volume preserves its state across image updates. Lyrebird is included, with `/usr/bin/obfs4proxy` available for existing bridge configurations.
+
+## Images
+
+Images for **AMD64 and ARM64** are built and published by [GitHub Actions](https://github.com/Elehiggle/tor-socks-proxy/actions). Use `latest` for updates, or `ghcr.io/elehiggle/tor-socks-proxy@sha256:DIGEST` to pin an immutable image.
+
+Signed build provenance is available. Verification is optional: see [verification](docs/verification.md). For stricter runtime settings, use [Docker Compose](docker-compose.yml).
+
+## Build locally
 
 ```sh
-docker logs tor-socks-proxy
+docker build --pull -t tor-socks-proxy .
 ```
 
-### Configuring a Client to Use the Proxy
+## Security and license
 
-```sh
-curl --socks5-hostname 127.0.0.1:9150 https://ipinfo.tw/ip
-```
-
-### Stopping the Proxy
-
-```sh
-docker stop tor-socks-proxy
-```
-
-## IP Renewal
-
-By default, Tor automatically changes IPs every 10 minutes. You can manually renew the IP by restarting the container:
-
-```sh
-docker restart tor-socks-proxy
-```
-
-## DNS over Tor
-
-Publish DNS port during setup to query DNS requests over Tor:
-
-```sh
-docker run -d --restart=always --name tor-socks-proxy -p 127.0.0.1:9150:9150/tcp -p 127.0.0.1:53:8853/udp peterdavehello/tor-socks-proxy:latest
-```
-## Sponsor
-
-<a href="https://m.do.co/c/1fdd0a1d695a"><img src="https://opensource.nyc3.cdn.digitaloceanspaces.com/attribution/assets/SVG/DO_Logo_horizontal_blue.svg" width="201px"></a>
-
-This project is now sponsored by DigitalOcean, providing us with a dedicated development and testing environment.
-
-For cloud VPS hosting with $200 in free credit, consider using my DigitalOcean referral link: https://m.do.co/c/1fdd0a1d695a
-
-## Support Tor Project
-
-Support the Tor project by [setting up Tor bridge/exit nodes](https://trac.torproject.org/projects/tor/wiki/TorRelayGuide) and [donating](https://donate.torproject.org/).
+[Security guidance](SECURITY.md) · [Source audit](docs/security-audit.md) · [GPLv3](LICENSE)

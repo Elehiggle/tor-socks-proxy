@@ -1,0 +1,11 @@
+.env
+.env.*
+*.pem
+*.key
+*.ppk
+*.tar
+*.tar.gz
+__pycache__/
+*.py[cod]
+dist/
+work/

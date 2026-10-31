@@ -1,22 +1,24 @@
-FROM alpine:3.24
+FROM alpine:3.24@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a
 
-LABEL maintainer="Peter Dave Hello <hsu@peterdavehello.org>"
-LABEL name="tor-socks-proxy"
-LABEL version="latest"
+LABEL org.opencontainers.image.title="tor-socks-proxy" \
+    org.opencontainers.image.description="Tor SOCKS5 and DNS client proxy with pluggable transports" \
+    org.opencontainers.image.source="https://github.com/Elehiggle/tor-socks-proxy" \
+    org.opencontainers.image.licenses="GPL-3.0-only"
 
-RUN echo '@edge https://dl-cdn.alpinelinux.org/alpine/edge/community' >> /etc/apk/repositories && \
-    echo '@edge https://dl-cdn.alpinelinux.org/alpine/edge/testing'   >> /etc/apk/repositories && \
-    apk -U upgrade && \
-    apk -v add tor@edge obfs4proxy@edge curl && \
-    chmod 700 /var/lib/tor && \
-    rm -rf /var/cache/apk/* && \
-    tor --version
-COPY --chown=tor:root torrc /etc/tor/
+RUN apk add --no-cache tor lyrebird curl && \
+    addgroup -S -g 10001 torproxy && \
+    adduser -S -D -H -h /var/lib/tor -u 10001 -G torproxy torproxy && \
+    chown 10001:10001 /var/lib/tor && \
+    chmod 0700 /var/lib/tor && \
+    ln -s /usr/bin/lyrebird /usr/bin/obfs4proxy
 
-HEALTHCHECK --timeout=10s --start-period=60s \
-    CMD curl --fail --socks5-hostname localhost:9150 -I -L 'https://www.facebookwkhpilnemxj7asaniu7vnjjbiltxjqhye3mhbshg7kx5tfyd.onion/' || exit 1
+COPY --chown=0:0 --chmod=0444 torrc /etc/tor/torrc
+COPY --chown=0:0 --chmod=0555 healthcheck.sh /usr/local/bin/tor-healthcheck
 
-USER tor
+HEALTHCHECK --interval=30s --timeout=30s --start-period=90s --retries=3 \
+    CMD ["/usr/local/bin/tor-healthcheck"]
+
+USER 10001:10001
 EXPOSE 8853/udp 9150/tcp
 
 CMD ["/usr/bin/tor", "-f", "/etc/tor/torrc"]

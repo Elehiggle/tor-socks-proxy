@@ -1,0 +1,218 @@
+name: Build and publish Docker image
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+  schedule:
+    - cron: '17 3 * * 1'
+
+permissions:
+  contents: read
+
+env:
+  REGISTRY_IMAGE: ghcr.io/elehiggle/tor-socks-proxy
+
+concurrency:
+  group: docker-${{ github.repository }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build and test ${{ matrix.architecture }}
+    if: github.repository == 'Elehiggle/tor-socks-proxy' && github.ref == 'refs/heads/master'
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - architecture: amd64
+            runner: ubuntu-24.04
+          - architecture: arm64
+            runner: ubuntu-24.04-arm
+    env:
+      SOURCE_REVISION: ${{ github.sha }}
+      BUILD_TAG: build-${{ github.run_id }}-${{ github.run_attempt }}
+      ARCHITECTURE: ${{ matrix.architecture }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Build native image
+        shell: bash
+        run: |
+          [[ "$SOURCE_REVISION" =~ ^[0-9a-f]{40}$ ]]
+          docker buildx build --load --pull --provenance=false --sbom=false \
+            --label org.opencontainers.image.source=https://github.com/Elehiggle/tor-socks-proxy \
+            --label "org.opencontainers.image.revision=$SOURCE_REVISION" \
+            --tag "elehiggle/tor-socks-proxy:sha-$SOURCE_REVISION" .
+      - name: Run offline image checks
+        shell: bash
+        run: sh scripts/ci-smoke.sh "elehiggle/tor-socks-proxy:sha-$SOURCE_REVISION"
+      - name: Push the tested platform image
+        id: registry
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          printf '%s' "$GH_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+          native_ref="$REGISTRY_IMAGE:$BUILD_TAG-$ARCHITECTURE"
+          docker tag "elehiggle/tor-socks-proxy:sha-$SOURCE_REVISION" "$native_ref"
+          docker push "$native_ref"
+          python3 - <<'PY'
+          import json, os, re, subprocess
+          from pathlib import Path
+          def inspect(reference, *arguments):
+              return json.loads(subprocess.check_output(
+                  ['docker', 'buildx', 'imagetools', 'inspect', reference, *arguments], text=True, timeout=60))
+          def require(condition):
+              if not condition: raise SystemExit('Registry image differs from the tested native image')
+          image, arch, revision = (os.environ[key] for key in ('REGISTRY_IMAGE', 'ARCHITECTURE', 'SOURCE_REVISION'))
+          local = json.loads(subprocess.check_output(
+              ['docker', 'image', 'inspect', f'elehiggle/tor-socks-proxy:sha-{revision}'], text=True))[0]
+          descriptor = inspect(f'{image}:{os.environ["BUILD_TAG"]}-{arch}', '--format', '{{json .Manifest}}')
+          if 'manifests' in descriptor:
+              require(len(descriptor['manifests']) == 1)
+              descriptor = descriptor['manifests'][0]
+          digest = descriptor['digest']
+          require(re.fullmatch(r'sha256:[0-9a-f]{64}', digest))
+          manifest = inspect(f'{image}@{digest}', '--raw')
+          labels = local['Config'].get('Labels') or {}
+          require(local['Architecture'] == arch and local['Os'] == 'linux')
+          require(labels.get('org.opencontainers.image.revision') == revision)
+          require(labels.get('org.opencontainers.image.source') == 'https://github.com/Elehiggle/tor-socks-proxy')
+          require(manifest.get('config', {}).get('digest') == local['Id'])
+          Path('digests').mkdir()
+          Path(f'digests/{arch}.json').write_text(json.dumps({
+              'image': image, 'architecture': arch, 'digest': digest,
+              'image_id': local['Id'], 'revision': revision,
+          }) + '\n')
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write(f'digest={digest}\n')
+          print(f'::notice::Native GHCR image pushed: {image}@{digest}')
+          PY
+      - name: Attest the native registry image
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-name: ${{ env.REGISTRY_IMAGE }}
+          subject-digest: ${{ steps.registry.outputs.digest }}
+          push-to-registry: true
+          create-storage-record: false
+      - name: Pass this immutable image digest to the index job
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: image-digest-${{ matrix.architecture }}
+          path: digests/*.json
+          if-no-files-found: error
+          retention-days: 1
+      - name: Remove registry credentials
+        if: always()
+        run: docker logout ghcr.io >/dev/null
+
+  publish:
+    name: Publish the tested multiarch image
+    needs: build
+    if: github.repository == 'Elehiggle/tor-socks-proxy' && github.ref == 'refs/heads/master'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      actions: read
+      packages: write
+      id-token: write
+      attestations: write
+    env:
+      SOURCE_REVISION: ${{ github.sha }}
+      BUILD_TAG: build-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - name: Download this run's native image digests
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: image-digest-*
+          merge-multiple: true
+          path: digests
+      - name: Combine both tested images by digest
+        id: index
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: Elehiggle/tor-socks-proxy
+        shell: bash
+        run: |
+          if [[ "$(gh api repos/$GH_REPO/commits/master --jq .sha)" != "$SOURCE_REVISION" ]]; then
+            echo '::notice::A newer source commit exists; this build will not replace latest.'
+            exit 0
+          fi
+          printf '%s' "$GH_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+          python3 - <<'PY'
+          import json, os, re, subprocess
+          from pathlib import Path
+          image, revision = os.environ['REGISTRY_IMAGE'], os.environ['SOURCE_REVISION']
+          def require(condition):
+              if not condition: raise SystemExit('Invalid native image digest metadata')
+          sources, expected = [], {}
+          for arch in ('amd64', 'arm64'):
+              raw = Path(f'digests/{arch}.json').read_bytes()
+              require(len(raw) <= 65536)
+              metadata = json.loads(raw)
+              require(metadata['image'] == 'ghcr.io/elehiggle/tor-socks-proxy' == image)
+              require(metadata['architecture'] == arch and metadata['revision'] == revision)
+              require(re.fullmatch(r'sha256:[0-9a-f]{64}', metadata['digest']))
+              require(re.fullmatch(r'sha256:[0-9a-f]{64}', metadata['image_id']))
+              source = f'{image}@{metadata["digest"]}'
+              manifest = json.loads(subprocess.check_output(
+                  ['docker', 'buildx', 'imagetools', 'inspect', source, '--raw'], text=True, timeout=60))
+              require(manifest.get('config', {}).get('digest') == metadata['image_id'])
+              sources.append(source)
+              expected[arch] = metadata['digest']
+          subprocess.run(['docker', 'buildx', 'imagetools', 'create',
+              '--tag', f'{image}:{os.environ["BUILD_TAG"]}',
+              '--annotation', 'index:org.opencontainers.image.source=https://github.com/Elehiggle/tor-socks-proxy',
+              '--annotation', f'index:org.opencontainers.image.revision={revision}',
+              '--metadata-file', 'index.json', *sources], check=True, timeout=120)
+          digest = json.loads(Path('index.json').read_text())['containerimage.descriptor']['digest']
+          require(re.fullmatch(r'sha256:[0-9a-f]{64}', digest))
+          index = json.loads(subprocess.check_output(
+              ['docker', 'buildx', 'imagetools', 'inspect', f'{image}@{digest}', '--raw'], text=True, timeout=60))
+          manifests = index.get('manifests', [])
+          require(len(manifests) == 2)
+          actual = {entry['platform']['architecture']: entry['digest'] for entry in manifests
+                    if entry['platform']['os'] == 'linux'}
+          require(actual == expected)
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write(f'digest={digest}\n')
+          PY
+      - name: Attest the multiarch index
+        if: steps.index.outputs.digest != ''
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-name: ${{ env.REGISTRY_IMAGE }}
+          subject-digest: ${{ steps.index.outputs.digest }}
+          push-to-registry: true
+          create-storage-record: false
+      - name: Promote the attested index to latest
+        if: steps.index.outputs.digest != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: Elehiggle/tor-socks-proxy
+          INDEX_DIGEST: ${{ steps.index.outputs.digest }}
+        shell: bash
+        run: |
+          if [[ "$(gh api repos/$GH_REPO/commits/master --jq .sha)" != "$SOURCE_REVISION" ]]; then
+            echo '::notice::A newer source commit exists; the attested build remains available by digest.'
+            exit 0
+          fi
+          docker buildx imagetools create --tag "$REGISTRY_IMAGE:latest" "$REGISTRY_IMAGE@$INDEX_DIGEST"
+          published=$(docker buildx imagetools inspect "$REGISTRY_IMAGE:latest" --format '{{json .Manifest}}' | jq -r .digest)
+          test "$published" = "$INDEX_DIGEST"
+          printf 'Image: `%s:latest`\n\nImmutable identity: `%s@%s`\n' \
+            "$REGISTRY_IMAGE" "$REGISTRY_IMAGE" "$INDEX_DIGEST" >> "$GITHUB_STEP_SUMMARY"
+      - name: Remove registry credentials
+        if: always()
+        run: docker logout ghcr.io >/dev/null

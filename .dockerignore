@@ -1,4 +1,4 @@
-.github
-*.md
-*.yml
-*.json
+**
+!Dockerfile
+!torrc
+!healthcheck.sh

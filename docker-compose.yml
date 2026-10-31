@@ -1,11 +1,25 @@
----
-version: "2"
-
 services:
   tor-socks-proxy:
     container_name: tor-socks-proxy
-    image: peterdavehello/tor-socks-proxy:latest
+    image: "${TORPROXY_IMAGE:-ghcr.io/elehiggle/tor-socks-proxy:latest}"
+    pull_policy: always
+    user: "10001:10001"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 128
+    mem_limit: 512m
+    cpus: 2.0
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=16m,mode=1777
+    volumes:
+      - tor-data:/var/lib/tor
     ports:
-      - "127.0.0.1:8853:53/udp"
-      - "127.0.0.1:9150:9150/tcp"
+      - "${TORPROXY_BIND_IP:-127.0.0.1}:${TORPROXY_DNS_PORT:-8853}:8853/udp"
+      - "${TORPROXY_BIND_IP:-127.0.0.1}:${TORPROXY_SOCKS_PORT:-9150}:9150/tcp"
     restart: unless-stopped
+
+volumes:
+  tor-data:
